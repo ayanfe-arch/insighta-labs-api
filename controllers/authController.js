@@ -25,7 +25,7 @@ const githubLogin = (req, res) => {
 
     const params = new URLSearchParams({
         client_id: process.env.GITHUB_CLIENT_ID,
-        redirect_uri: "https://your-app.up.railway.app/auth/github/callback",
+        redirect_uri: `${process.env.APP_URL}/auth/github/callback`,
         scope: 'user:email',
         state
     })
@@ -45,7 +45,7 @@ const githubCallback = async (req, res) => {
             client_id: process.env.GITHUB_CLIENT_ID,
             client_secret: process.env.GITHUB_CLIENT_SECRET,
             code,
-            redirect_uri: "https://your-app.up.railway.app/auth/github/callback"
+            redirect_uri: `${process.env.APP_URL}/auth/github/callback`,
         })
 
         const tokenRes = await axios.post(
