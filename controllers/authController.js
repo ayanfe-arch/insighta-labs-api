@@ -4,17 +4,20 @@ const jwt = require('jsonwebtoken')
 const crypto = require('crypto')
 const User = require('../models/User')
 
+// Store state temporarily in memory for validation
+const stateStore = new Map()
+
 const generateTokens = (user) => {
     const accessToken = jwt.sign(
         { id: user._id, role: user.role },
         process.env.JWT_SECRET,
-        { expiresIn: process.env.ACCESS_TOKEN_EXPIRY }
+        { expiresIn: '3m' }
     )
 
     const refreshToken = jwt.sign(
         { id: user._id },
         process.env.JWT_SECRET,
-        { expiresIn: process.env.REFRESH_TOKEN_EXPIRY }
+        { expiresIn: '5m' }
     )
 
     return { accessToken, refreshToken }
@@ -23,9 +26,12 @@ const generateTokens = (user) => {
 const githubLogin = (req, res) => {
     const state = crypto.randomBytes(16).toString('hex')
 
+    // Store state with expiry (5 mins)
+    stateStore.set(state, Date.now() + 5 * 60 * 1000)
+
     const params = new URLSearchParams({
         client_id: process.env.GITHUB_CLIENT_ID,
-        redirect_uri: `${process.env.APP_URL}/auth/github/callback`,
+        redirect_uri: process.env.CALLBACK_URL,
         scope: 'user:email',
         state
     })
@@ -35,22 +41,44 @@ const githubLogin = (req, res) => {
 
 const githubCallback = async (req, res) => {
     try {
-        const { code } = req.query
+        const { code, state } = req.query
 
-        if (!code) {
-            return res.status(400).json({ status: "error", message: "Missing code" })
+        // Validate state
+        if (!state || !stateStore.has(state)) {
+            return res.status(400).json({ 
+                status: "error", 
+                message: "Invalid or expired state" 
+            })
         }
 
-        const params = new URLSearchParams({
-            client_id: process.env.GITHUB_CLIENT_ID,
-            client_secret: process.env.GITHUB_CLIENT_SECRET,
-            code,
-            redirect_uri: `${process.env.APP_URL}/auth/github/callback`,
-        })
+        // Check state hasn't expired
+        if (Date.now() > stateStore.get(state)) {
+            stateStore.delete(state)
+            return res.status(400).json({ 
+                status: "error", 
+                message: "State expired, please try again" 
+            })
+        }
 
+        // Clean up used state
+        stateStore.delete(state)
+
+        if (!code) {
+            return res.status(400).json({ 
+                status: "error", 
+                message: "Missing code" 
+            })
+        }
+
+        // Exchange code for GitHub access token
         const tokenRes = await axios.post(
             'https://github.com/login/oauth/access_token',
-            params.toString(),
+            new URLSearchParams({
+                client_id: process.env.GITHUB_CLIENT_ID,
+                client_secret: process.env.GITHUB_CLIENT_SECRET,
+                code,
+                redirect_uri: process.env.CALLBACK_URL,
+            }).toString(),
             {
                 headers: {
                     Accept: 'application/json',
@@ -62,20 +90,35 @@ const githubCallback = async (req, res) => {
         const githubAccessToken = tokenRes.data.access_token
 
         if (!githubAccessToken) {
+            console.error('GitHub token exchange failed:', tokenRes.data)
             return res.status(400).json({
                 status: "error",
-                message: "GitHub access token not received"
+                message: "GitHub access token not received",
+                detail: tokenRes.data.error_description || tokenRes.data.error
             })
         }
 
+        // Get GitHub user info
         const userRes = await axios.get('https://api.github.com/user', {
-            headers: {
-                Authorization: `Bearer ${githubAccessToken}`
-            }
+            headers: { Authorization: `Bearer ${githubAccessToken}` }
         })
 
-        const { id, login, email, avatar_url } = userRes.data
+        let { id, login, email, avatar_url } = userRes.data
 
+        // GitHub sometimes doesn't return email, fetch it separately
+        if (!email) {
+            try {
+                const emailRes = await axios.get('https://api.github.com/user/emails', {
+                    headers: { Authorization: `Bearer ${githubAccessToken}` }
+                })
+                const primaryEmail = emailRes.data.find(e => e.primary && e.verified)
+                email = primaryEmail ? primaryEmail.email : ''
+            } catch {
+                email = ''
+            }
+        }
+
+        // Create or update user
         let user = await User.findOne({ github_id: String(id) })
 
         if (!user) {
@@ -84,54 +127,67 @@ const githubCallback = async (req, res) => {
                 username: login,
                 email: email || '',
                 avatar_url,
-                role: 'analyst'
+                role: 'analyst',
+                is_active: true
             })
         } else {
+            if (!user.is_active) {
+                return res.status(403).json({
+                    status: "error",
+                    message: "Account is deactivated"
+                })
+            }
             user.username = login
             user.avatar_url = avatar_url
+            if (email) user.email = email
         }
 
         const tokens = generateTokens(user)
 
         user.refresh_token = tokens.refreshToken
         user.last_login_at = new Date()
-
         await user.save()
 
+        // CLI flow — return JSON
         if (req.query.cli) {
             return res.json({
                 status: "success",
-                ...tokens,
+                access_token: tokens.accessToken,
+                refresh_token: tokens.refreshToken,
                 username: login
             })
         }
 
-        res.cookie('access_token', tokens.accessToken, {
+        // Web flow — set HTTP-only cookies
+        const cookieOptions = {
             httpOnly: true,
             secure: true,
-            sameSite: 'none',
+            sameSite: 'none'
+        }
+
+        res.cookie('access_token', tokens.accessToken, {
+            ...cookieOptions,
             maxAge: 3 * 60 * 1000
         })
 
         res.cookie('refresh_token', tokens.refreshToken, {
-            httpOnly: true,
-            secure: true,
-            sameSite: 'none',
+            ...cookieOptions,
             maxAge: 5 * 60 * 1000
         })
 
         return res.json({
             status: "success",
-            ...tokens,
+            access_token: tokens.accessToken,
+            refresh_token: tokens.refreshToken,
             username: login
         })
 
     } catch (err) {
         console.error("GitHub auth error:", err.response?.data || err.message)
-
         return res.status(500).json({
             status: "error",
-            message: "Authentication failed"
+            message: "Authentication failed",
+            detail: err.message
         })
     }
 }
@@ -148,7 +204,6 @@ const refreshToken = async (req, res) => {
         }
 
         const decoded = jwt.verify(refresh_token, process.env.JWT_SECRET)
-
         const user = await User.findById(decoded.id)
 
         if (!user || user.refresh_token !== refresh_token) {
@@ -158,14 +213,23 @@ const refreshToken = async (req, res) => {
             })
         }
 
+        if (!user.is_active) {
+            return res.status(403).json({
+                status: "error",
+                message: "Account is deactivated"
+            })
+        }
+
         const tokens = generateTokens(user)
 
+        // Invalidate old, store new
         user.refresh_token = tokens.refreshToken
         await user.save()
 
         return res.json({
             status: "success",
-            ...tokens
+            access_token: tokens.accessToken,
+            refresh_token: tokens.refreshToken
         })
 
     } catch (err) {
