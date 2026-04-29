@@ -23,7 +23,7 @@ const githubLogin = (req, res) => {
     const state = crypto.randomBytes(16).toString('hex')
     const params = new URLSearchParams({
         client_id: process.env.GITHUB_CLIENT_ID,
-        redirect_uri: process.env.GITHUB_CALLBACK_URL,
+       redirect_uri: "https://your-app.up.railway.app/auth/github/callback",,
         scope: 'user:email',
         state
     })
@@ -40,7 +40,7 @@ const githubCallback = async (req, res) => {
             client_id: process.env.GITHUB_CLIENT_ID,
             client_secret: process.env.GITHUB_CLIENT_SECRET,
             code,
-            redirect_uri: process.env.GITHUB_CALLBACK_URL
+           redirect_uri: "https://your-app.up.railway.app/auth/github/callback",
         }, { headers: { Accept: 'application/json' } })
 
         const githubAccessToken = tokenRes.data.access_token
