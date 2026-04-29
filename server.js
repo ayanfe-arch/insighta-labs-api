@@ -6,6 +6,7 @@ const morgan = require('morgan')
 const rateLimit = require('express-rate-limit')
 
 const app = express()
+app.set('trust proxy', 1)
 
 // Logging
 app.use(morgan('combined'))
@@ -32,7 +33,7 @@ const apiLimiter = rateLimit({
     message: { status: "error", message: "Too many requests" }
 })
 
-app.use('/auth', authLimiter)
+//app.use('/auth', authLimiter)
 app.use('/api', apiLimiter)
 
 // Routes
