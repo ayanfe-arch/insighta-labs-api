@@ -31,7 +31,7 @@ const githubLogin = (req, res) => {
 
     const params = new URLSearchParams({
         client_id: process.env.GITHUB_CLIENT_ID,
-        redirect_uri: process.env.CALLBACK_URL,
+        redirect_uri: process.env.GITHUB_CALLBACK_URL,
         scope: 'user:email',
         state
     })
