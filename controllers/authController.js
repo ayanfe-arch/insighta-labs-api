@@ -10,50 +10,74 @@ const generateTokens = (user) => {
         process.env.JWT_SECRET,
         { expiresIn: process.env.ACCESS_TOKEN_EXPIRY }
     )
+
     const refreshToken = jwt.sign(
         { id: user._id },
         process.env.JWT_SECRET,
         { expiresIn: process.env.REFRESH_TOKEN_EXPIRY }
     )
+
     return { accessToken, refreshToken }
 }
 
-// Step 1: Redirect to GitHub
 const githubLogin = (req, res) => {
     const state = crypto.randomBytes(16).toString('hex')
+
     const params = new URLSearchParams({
         client_id: process.env.GITHUB_CLIENT_ID,
-       redirect_uri: "https://your-app.up.railway.app/auth/github/callback",,
+        redirect_uri: "https://your-app.up.railway.app/auth/github/callback",
         scope: 'user:email',
         state
     })
-    res.redirect(`https://github.com/login/oauth/authorize?${params}`)
+
+    res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`)
 }
 
-// Step 2: Handle callback
 const githubCallback = async (req, res) => {
     try {
         const { code } = req.query
 
-        // Exchange code for access token
-        const tokenRes = await axios.post('https://github.com/login/oauth/access_token', {
+        if (!code) {
+            return res.status(400).json({ status: "error", message: "Missing code" })
+        }
+
+        const params = new URLSearchParams({
             client_id: process.env.GITHUB_CLIENT_ID,
             client_secret: process.env.GITHUB_CLIENT_SECRET,
             code,
-           redirect_uri: "https://your-app.up.railway.app/auth/github/callback",
-        }, { headers: { Accept: 'application/json' } })
+            redirect_uri: "https://your-app.up.railway.app/auth/github/callback"
+        })
+
+        const tokenRes = await axios.post(
+            'https://github.com/login/oauth/access_token',
+            params.toString(),
+            {
+                headers: {
+                    Accept: 'application/json',
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+            }
+        )
 
         const githubAccessToken = tokenRes.data.access_token
 
-        // Get user info from GitHub
+        if (!githubAccessToken) {
+            return res.status(400).json({
+                status: "error",
+                message: "GitHub access token not received"
+            })
+        }
+
         const userRes = await axios.get('https://api.github.com/user', {
-            headers: { Authorization: `Bearer ${githubAccessToken}` }
+            headers: {
+                Authorization: `Bearer ${githubAccessToken}`
+            }
         })
 
         const { id, login, email, avatar_url } = userRes.data
 
-        // Create or update user
         let user = await User.findOne({ github_id: String(id) })
+
         if (!user) {
             user = new User({
                 github_id: String(id),
@@ -67,79 +91,122 @@ const githubCallback = async (req, res) => {
             user.avatar_url = avatar_url
         }
 
-        const { accessToken, refreshToken } = generateTokens(user)
-        user.refresh_token = refreshToken
+        const tokens = generateTokens(user)
+
+        user.refresh_token = tokens.refreshToken
         user.last_login_at = new Date()
+
         await user.save()
 
-        // For CLI: return tokens as JSON
-        // For web: set cookies
         if (req.query.cli) {
             return res.json({
                 status: "success",
-                access_token: accessToken,
-                refresh_token: refreshToken,
+                ...tokens,
                 username: login
             })
         }
 
-        // For web portal
-        res.cookie('access_token', accessToken, { httpOnly: true, secure: false, maxAge: 3 * 60 * 1000 })
-        res.cookie('refresh_token', refreshToken, { httpOnly: true, secure: false, maxAge: 5 * 60 * 1000 })
+        res.cookie('access_token', tokens.accessToken, {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'none',
+            maxAge: 3 * 60 * 1000
+        })
+
+        res.cookie('refresh_token', tokens.refreshToken, {
+            httpOnly: true,
+            secure: true,
+            sameSite: 'none',
+            maxAge: 5 * 60 * 1000
+        })
+
         return res.json({
-    status: "success",
-    access_token: accessToken,
-    refresh_token: refreshToken,
-    username: login
-})
+            status: "success",
+            ...tokens,
+            username: login
+        })
+
     } catch (err) {
-        return res.status(500).json({ status: "error", message: "Authentication failed" })
+        console.error("GitHub auth error:", err.response?.data || err.message)
+
+        return res.status(500).json({
+            status: "error",
+            message: "Authentication failed"
+        })
     }
 }
 
-// Refresh token
 const refreshToken = async (req, res) => {
     try {
         const { refresh_token } = req.body
-        if (!refresh_token) return res.status(400).json({ status: "error", message: "Refresh token required" })
+
+        if (!refresh_token) {
+            return res.status(400).json({
+                status: "error",
+                message: "Refresh token required"
+            })
+        }
 
         const decoded = jwt.verify(refresh_token, process.env.JWT_SECRET)
+
         const user = await User.findById(decoded.id)
 
         if (!user || user.refresh_token !== refresh_token) {
-            return res.status(401).json({ status: "error", message: "Invalid refresh token" })
+            return res.status(401).json({
+                status: "error",
+                message: "Invalid refresh token"
+            })
         }
 
-        const { accessToken, refreshToken: newRefreshToken } = generateTokens(user)
-        user.refresh_token = newRefreshToken
+        const tokens = generateTokens(user)
+
+        user.refresh_token = tokens.refreshToken
         await user.save()
 
         return res.json({
             status: "success",
-            access_token: accessToken,
-            refresh_token: newRefreshToken
+            ...tokens
         })
+
     } catch (err) {
-        return res.status(401).json({ status: "error", message: "Invalid or expired refresh token" })
+        return res.status(401).json({
+            status: "error",
+            message: "Invalid or expired refresh token"
+        })
     }
 }
 
-// Logout
 const logout = async (req, res) => {
     try {
         req.user.refresh_token = null
         await req.user.save()
+
         res.clearCookie('access_token')
         res.clearCookie('refresh_token')
-        return res.json({ status: "success", message: "Logged out successfully" })
+
+        return res.json({
+            status: "success",
+            message: "Logged out successfully"
+        })
     } catch (err) {
-        return res.status(500).json({ status: "error", message: "Logout failed" })
+        return res.status(500).json({
+            status: "error",
+            message: "Logout failed"
+        })
     }
 }
 
-// Whoami
 const whoami = (req, res) => {
-    return res.json({ status: "success", data: req.user })
+    return res.json({
+        status: "success",
+        data: req.user
+    })
 }
 
-module.exports = { githubLogin, githubCallback, refreshToken, logout, whoami }
+module.exports = {
+    githubLogin,
+    githubCallback,
+    refreshToken,
+    logout,
+    whoami
+}
