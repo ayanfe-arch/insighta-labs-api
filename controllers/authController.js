@@ -27,7 +27,12 @@ const githubLogin = (req, res) => {
     const state = crypto.randomBytes(16).toString('hex')
 
     // Store state with expiry (5 mins)
-    stateStore.set(state, Date.now() + 5 * 60 * 1000)
+    res.cookie('oauth_state', state, {
+        httpOnly: true,
+        secure: true,
+        sameSite: 'none',
+        maxAge: 5 * 60 * 1000
+    })
 
     const params = new URLSearchParams({
         client_id: process.env.GITHUB_CLIENT_ID,
@@ -43,25 +48,18 @@ const githubCallback = async (req, res) => {
     try {
         const { code, state } = req.query
 
-        // Validate state
-        if (!state || !stateStore.has(state)) {
+        // Validate state against cookie
+        const storedState = req.cookies?.oauth_state
+
+        if (!state || !storedState || state !== storedState) {
             return res.status(400).json({ 
                 status: "error", 
                 message: "Invalid or expired state" 
             })
         }
 
-        // Check state hasn't expired
-        if (Date.now() > stateStore.get(state)) {
-            stateStore.delete(state)
-            return res.status(400).json({ 
-                status: "error", 
-                message: "State expired, please try again" 
-            })
-        }
-
-        // Clean up used state
-        stateStore.delete(state)
+        
+        res.clearCookie('oauth_state')
 
         if (!code) {
             return res.status(400).json({ 
@@ -69,6 +67,8 @@ const githubCallback = async (req, res) => {
                 message: "Missing code" 
             })
         }
+
+      
 
         // Exchange code for GitHub access token
         const tokenRes = await axios.post(
